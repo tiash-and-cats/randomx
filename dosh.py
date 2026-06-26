@@ -64,7 +64,7 @@ def num(s):
             if s.endswith("H"):
                 return int(s.removesuffix("H"), 16)
             elif s.endswith("o"):
-                return int(s.removesuffix("o"), 😎
+                return int(s.removesuffix("o"), 8)
     raise ValueError("invalid number literal")
 
 def eval_expr(expr, varses, procs):

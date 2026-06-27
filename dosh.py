@@ -159,6 +159,8 @@ def preprocess(cmd_str, varses, procs):
         var = match.groups()[0]
         if var in varses:
             return str(varses[var])
+        elif var.startswith("-s") and var.removeprefix("-s") in shopt:
+            return str(shopt[var.removeprefix("-s")])
         elif shopt["quit-undefined-var"] != "0":
             raise Exception(f"variable {var} is not defined")
         else:
@@ -403,7 +405,7 @@ def run_cmd(cmds, varses=gvarses, procs=gprocs):
             traceback.print_exception(e)
         return 1
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     while True:
         print(os.getcwd())
         cmd_list = ""

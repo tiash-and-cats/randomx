@@ -9,6 +9,7 @@ from pygments import highlight, lexers
 from pygments.util import ClassNotFound
 from pygments.lexers.special import TextLexer
 from pygments.formatters import TerminalFormatter, TerminalTrueColorFormatter
+from minrepl.fancyinput import _NoLineWrapping, _RawKeyReader, Special
 
 if os.name == "nt":
     # Enable ANSI escape sequences in Windows Console
@@ -45,7 +46,10 @@ def clear_screen(quick=True, file=sys.stdout):
 def rehighlight():
     global cached_highlight
     try:
-        lexer = lexers.get_lexer_for_filename(filename)
+        if filename:
+            lexer = lexers.get_lexer_for_filename(filename)
+        else:
+            lexer = txtlexer
     except ClassNotFound:
         lexer = txtlexer
     cached_highlight = highlight(
@@ -172,69 +176,11 @@ def open_file():
         print(f"Error: '{filename}' not found!")
     input("Press ENTER to continue...")
 
-class SpecialKey(Enum):
-    LEFT = auto(); RIGHT = auto(); UP = auto();
-    DOWN = auto(); DEL = auto()
-
-class RawKeyReader:   
-    if sys.platform == "win32":
-        def get(self):
-            import msvcrt
-            ch = msvcrt.getwch()
-            if ch in ("\x00", "\xe0"):  # special key prefix
-                ch2 = msvcrt.getwch()
-                return {
-                    "K": SpecialKey.LEFT,
-                    "M": SpecialKey.RIGHT,
-                    "S": SpecialKey.DEL,
-                    "H": SpecialKey.UP,
-                    "P": SpecialKey.DOWN,
-                }.get(ch2, ch2)
-            return ch
-        
-        def __enter__(self): 
-            return self
-        
-        def __exit__(self, *_): pass
-    else:
-        def __enter__(self):
-            import tty, termios
-            self.fd = sys.stdin.fileno()
-            self.old = termios.tcgetattr(self.fd)
-            tty.setraw(self.fd)
-            return self
-        
-        def __exit__(self, *_):
-            import termios
-            termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old)
-        
-        def get(self):
-            ch = sys.stdin.read(1)
-            if ch == "\x1b":  # escape sequence
-                seq = sys.stdin.read(2)
-                key = {
-                    "[D": SpecialKey.LEFT,
-                    "[C": SpecialKey.RIGHT,
-                    "[A": SpecialKey.UP,
-                    "[B": SpecialKey.DOWN,
-                    "[3": SpecialKey.DEL,
-                }.get(seq, ch+seq)
-                if key == SpecialKey.DEL:
-                    sys.stdin.read(1)
-                return key
-            return ch
-
-class NoLineWrapping:
-    def __enter__(self):
-        print("\x1b[=7l\x1b[?7l\x1b[7l", end="", flush=True)
-    def __exit__(self, *_):
-        print("\x1b[=7h\x1b[?7h\x1b[7h", end="", flush=True)
-
 # Main loop
-with NoLineWrapping():
+with _NoLineWrapping():
     redraw()
     while True:
-        with RawKeyReader() as reader: key = reader.get()
+        with _RawKeyReader() as reader: key = reader.get()
         if key == "\x18":  # ^X
             clear_screen()
             if modified:
@@ -267,10 +213,10 @@ with NoLineWrapping():
             open_file()
             rehighlight()
             modified = False
-        elif key == SpecialKey.LEFT: move_left()
-        elif key == SpecialKey.RIGHT: move_right()
-        elif key == SpecialKey.UP: move_up()
-        elif key == SpecialKey.DOWN: move_down()
+        elif key == Special.LEFT: move_left()
+        elif key == Special.RIGHT: move_right()
+        elif key == Special.UP: move_up()
+        elif key == Special.DOWN: move_down()
         else:
             insert_char(key)
             rehighlight()

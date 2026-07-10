@@ -66,9 +66,9 @@ class _RawKeyReader:
 
 class _NoLineWrapping:
     def __enter__(self):
-        print("\x1b[=7l", end="", flush=True)
+        print("\x1b[=7l\x1b[?7l\x1b[7l", end="", flush=True)
     def __exit__(self, *_):
-        print("\x1b[=7h", end="", flush=True)
+        print("\x1b[=7h\x1b[?7h\x1b[7h", end="", flush=True)
 
 def _printable(s):
     return len(repr(s)) <= 4

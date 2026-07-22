@@ -87,6 +87,7 @@ class Repl:
         self.flags = 0  # track __future__ flags
         
         self.globs["input"] = input
+        self.globs["__minrepl__"] = self
         
     def is_complete(self, code):
         """Checks if the given code is complete."""
@@ -182,9 +183,7 @@ class Repl:
                     if line == self.SIGINT:
                         break
                     elif line == self.EOF:
-                        if self.exit_handler:
-                            self.exit_handler()
-                        return
+                        return self.EOF
                     code += f"\n{line}"
                 try:
                     self.run_code(code)
@@ -220,7 +219,7 @@ class FancyRepl(Repl):
         if src == "exit":
             raise SystemExit()
         elif src == "clear":
-            print("\x1bc\x1b[2J", end="", flush=True)
+            print("\x1bc\x1b[2J\x1b[3J", end="", flush=True)
             return
             
         super().run_code(src)
@@ -238,14 +237,17 @@ class FancyRepl(Repl):
         
         def callback(char, myinput):
             nonlocal index
-            if isinstance(char, Special):
-                if char == Special.UP:
+            if char in {Special.UP, Special.DOWN, "\x10", "\x0e"}:
+                if char in {Special.UP, "\x10"}:
                     index += 1
-                elif char == Special.DOWN:
+                elif char in {Special.DOWN, "\x0e"}:
                     index -= 1
                 index = max(min(index, len(self.history) - 1), 0)
                 return Verbatim(self.history[-(index + 1)]) if self.history \
                        else None
+            elif char == "\x0c":
+                print("\x1bc\x1b[2J\x1b[3J\x1b7", end="", flush=True)
+                return ""
             elif char == "\t":
                 r = ""
                 i = 0

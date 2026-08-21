@@ -16,8 +16,8 @@ import __future__
 import rlcompleter
 import ast
 import os
+from fygment import highlight
 from .fancyinput import finput, Special, Verbatim
-from .fygment import highlight
 
 sys.ps1 = getattr(sys, "ps1", ">>> ")
 sys.ps2 = getattr(sys, "ps2", "... ")

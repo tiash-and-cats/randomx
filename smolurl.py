@@ -1,19 +1,22 @@
 """
 Tiny module with which you can:
-    - send http requests
     - parse URLs
-    
-smolurl follows redirects; you can change the redirect limit by changing 
+    - send http requests,
+    - get the response,
+    - and stream it too!
+
+smolurl follows redirects; you can change the redirect limit by changing
 smolurl.REDIR_LIMIT (defaults to 5).
 
 smolurl supports HTTP/1.0 with SSL/TLS.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from collections.abc import MutableMapping
 from abc import ABC, abstractmethod
 from compression import gzip, zstd, zlib
+from contextlib import asynccontextmanager
 from http import HTTPStatus
 import io
 import os
@@ -21,6 +24,7 @@ import ssl
 import sys
 import http
 import socket
+import asyncio
 import traceback
 import threading
 import posixpath
@@ -46,8 +50,8 @@ def _deflate(data):
 
 ACCEPT_ENCODINGS = {
     "gzip": gzip.decompress,
-    "deflate": _deflate,
     "zstd": zstd.decompress,
+    "deflate": _deflate,
 }
 
 del _deflate
@@ -81,20 +85,10 @@ class Headers(MutableMapping):
     case-insensitively.
     """
 
-    def __init__(self, *args, **kw):
-        if len(args) > 1:
-            raise TypeError("Headers can only be initialized with one "
-                            "positional argument")
-        if args:
-            if hasattr(args[0], 'iteritems'):
-                items = list(args[0].iteritems())
-            elif hasattr(args[0], 'items'):
-                items = list(args[0].items())
-            else:
-                items = list(args[0])
-            self._items = items
-        else:
-            self._items = []
+    def __init__(self, a=None, **kw):
+        self._items = []
+        if a:
+            self.extend(a)
         if kw:
             self._items.extend(kw.items())
 
@@ -274,22 +268,47 @@ class Headers(MutableMapping):
 
 # ========= End of modified webob.multidict code ======================
 
+def _decomp(text, headers):
+    if "Content-Encoding" in headers:
+        encs = map(str.strip, headers["Content-Encoding"].split(","))
+
+        for enc in encs:
+            if enc in ACCEPT_ENCODINGS:
+                text = ACCEPT_ENCODINGS[enc](text)
+            else:
+                if enc == "br":
+                    raise ValueError("Can not decode 'br' encoding "
+                                     "because the brotli module was "
+                                     "not installed. Please install "
+                                     "it to fix the issue.")
+
+                raise ValueError(f"Unknown encoding: {enc}")
+    return text
+
+def _charset(headers):
+    charset = "latin1"
+    if "Content-Type" in headers:
+        match = content_type_regex.match(headers["Content-Type"])
+        if match and match["charset"]:
+            charset = match["charset"]
+    return charset
+
 @dataclass
 class Request:
     """A dataclass representing a request."""
     url: str
     method: str = "GET"
-    headers: dict = field(default_factory=dict)
+    headers: Headers = field(default_factory=Headers)
     data: str = ""
-    
+
 @dataclass(frozen=True)
 class Response:
     """A dataclass representing a response."""
+    url: str
     status: int
     reason: str
     headers: Headers
     body: bytes
-    url: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -299,8 +318,8 @@ class Response:
         if not self.ok:
             status_info = http.HTTPStatus(self.status)
             raise ValueError(f"{self.status} {status_info.phrase}: {
-                             status_info.description}")
-        
+                             status_info.description} (body: {self.body})")
+
         return self
 
     def expect(self, msg):
@@ -310,37 +329,79 @@ class Response:
         return self
 
     def decmp(self):
-        text = self.body
-        
-        if "Content-Encoding" in self.headers:
-            encs = map(str.strip, self.headers["Content-Encoding"].split(","))
-            
-            for enc in encs:
-                if enc in ACCEPT_ENCODINGS:
-                    text = ACCEPT_ENCODINGS[enc](text)
-                else:
-                    if enc == "br":
-                        raise ValueError("Can not decode 'br' encoding because"
-                                         " the brotli module was not installed"
-                                         ". Please install it to fix the issue"
-                                         ".")
-                    raise ValueError(f"Unknown encoding: {enc}")
-        
-        return text
-    
+        return _decomp(self.body, self.headers)
+
     def text(self):
-        text = self.decmp()
-        
-        charset = None
-        
-        if "Content-Type" in self.headers:
-            match = content_type_regex.match(self.headers["Content-Type"])
-            if match and match["charset"]:
-                charset = match["charset"]
-        
-        text = text.decode(charset or "latin1", errors="replace")
-        
-        return text
+        return self.decmp().decode(_charset(self.headers), errors="replace")
+
+@dataclass(frozen=True)
+class StreamingResponse:
+    """A dataclass representing a streamed response."""
+    url: str
+    status: int
+    reason: str
+    headers: Headers
+    reader: asyncio.StreamReader
+    writer: asyncio.StreamWriter
+
+    @property
+    def ok(self) -> bool:
+        return self.status < 400
+
+    async def unwrap(self):
+        if not self.ok:
+            status_info = http.HTTPStatus(self.status)
+            err_body = await self.body()
+            await self.__aexit__()
+            
+            raise ValueError(f"{self.status} {status_info.phrase}: {
+                             status_info.description} (body: {err_body})")
+
+        return self
+
+    async def expect(self, msg):
+        if not self.ok:
+            await self.__aexit__()
+            raise ValueError(f"{msg} ({self.status} {
+                             http.HTTPStatus(self.status).phrase})")
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_):
+        try:
+            self.writer.close()
+            await self.writer.wait_closed()
+        except: pass
+
+    async def iterbody(self):
+        while True:
+            line = await self.reader.readline()
+            if not line:
+                break
+            yield line
+
+    __aiter__ = iterbody
+
+    async def itertext(self):
+        charset = _charset(self.headers)
+
+        async for line in self:
+            yield line.decode(charset, errors="replace")
+
+    async def body(self):
+        x = b""
+        async for ln in self:
+            x += ln
+        return x
+
+    async def decmp(self):
+        return _decomp(await self.body(), self.headers)
+
+    async def text(self):
+        return (await self.decmp()).decode(_charset(self.headers),
+                                           errors="replace")
 
 @dataclass(frozen=True)
 class ParsedURL:
@@ -351,26 +412,17 @@ class ParsedURL:
     pathname: str | None
     querystr: str | None
     fragment: str | None
-    
+
     def replace(self, **kwargs) -> "ParsedURL":
         """Return a copy of this ParsedURL with some fields replaced."""
-        fields = {
-            "protocol": self.protocol,
-            "hostname": self.hostname,
-            "port": self.port,
-            "pathname": self.pathname,
-            "querystr": self.querystr,
-            "fragment": self.fragment,
-        }
-        fields.update(kwargs)
-        return ParsedURL(**fields)
+        return replace(self, **kwargs)
 
 class Processor(ABC):
     """
-    A Processor is a class that processes the Response before returning it 
+    A Processor is a class that processes the Response before returning it
     to the end user.
     """
-    
+
     @abstractmethod
     def process(self, response: Response):
         pass
@@ -378,11 +430,12 @@ class Processor(ABC):
 class CookieJar(Processor):
     """
     A Processor that implements a basic cookie jar.
+    Keyword "basic". This will break sometimes.
     """
     def __init__(self):
         self.cookies = {}
-        
-    def add_cookie(self, key: str, value: str, domain: str, 
+
+    def add_cookie(self, key: str, value: str, domain: str,
                    path: str, *, expires: datetime | None = None):
         """Adds a cookie."""
         x = self.cookies.setdefault(domain, {}).setdefault(path, [])
@@ -394,10 +447,10 @@ class CookieJar(Processor):
             "path": path,
             "expires": expires,
         })
-        
-    def parse_Set_Cookie(self, Set_Cookie: str, parsed_url: ParsedURL):
+
+    def parse_set_cookie(self, set_cookie: str, parsed_url: ParsedURL):
         """Parses a Set-Cookie header."""
-        parts = [p.strip() for p in Set_Cookie.split(";")]
+        parts = [p.strip() for p in set_cookie.split(";")]
         key, value = parts[0].split("=", 1)
         options = [p.split("=", 1) if "=" in p else (p, None) for p in parts[1:]]
         path = parsed_url.pathname
@@ -411,39 +464,47 @@ class CookieJar(Processor):
                     domain = value
                 case "Expires":
                     try:
-                        expires = datetime.strptime(value, "%a, %d %b %Y %H:%M:%S GMT")
+                        expires = datetime.strptime(
+                            value, "%a, %d %b %Y %H:%M:%S GMT"
+                        )
                     except:
                         expires = None
                 case "Max-Age":
                     try:
-                        expires = datetime.now() + timedelta(seconds=int(value))
+                        expires = datetime.now() + timedelta(
+                            seconds=int(value)
+                        )
                     except:
                         expires = None
+
         self.add_cookie(key, value, domain=domain, path=path, expires=expires)
-    
-    def get_Cookie(self, parsed_url: ParsedURL):
+
+    def get_cookie(self, parsed_url: ParsedURL):
         """Gets a string for the Cookie header."""
         return "; ".join([
-            f"{c["key"]}={c["value"]}" 
+            f"{c["key"]}={c["value"]}"
             for c in self.cookies[parsed_url.hostname][parsed_url.pathname]
         ])
-    
+
     def refresh(self):
         """Throws out cookies that have become too stale."""
         for domain in self.cookies.values():
             for path in domain.values():
-                path[:] = [c for c in path if not (c['expires'] and datetime.now() >= c['expires'])]
-    
+                path[:] = [
+                    c for c in path if not
+                    (c['expires'] and datetime.now() >= c['expires'])
+                ]
+
     def sessionend(self):
         """Deletes session cookies."""
         for domain in self.cookies.values():
             for path in domain.values():
                 path[:] = [c for c in path if not c['expires']]
-    
+
     def process(self, res: Response):
         parsed_url = parse_url(res.url)
-        for Set_Cookie in res.headers.getall("Set-Cookie"):
-            self.parse_Set_Cookie(Set_Cookie, parsed_url)
+        for set_cookie in res.headers.getall("Set-Cookie"):
+            self.parse_set_cookie(set_cookie, parsed_url)
 
 def parse_url(url: str) -> ParsedURL:
     """Parses a URL into individual components and returns a ParsedURL."""
@@ -466,7 +527,7 @@ def parse_url(url: str) -> ParsedURL:
         querystr=query or None,
         fragment=frag or None,
     )
-    
+
 def unparse_url(parsed_url: ParsedURL) -> str:
     """Joins a parsed URL back into a string."""
     url = f"{parsed_url.protocol}://{parsed_url.hostname}"
@@ -475,9 +536,12 @@ def unparse_url(parsed_url: ParsedURL) -> str:
     if parsed_url.querystr: url += f"?{parsed_url.querystr}"
     if parsed_url.fragment: url += f"#{parsed_url.fragment}"
     return url
-    
+
 def absolute_url(parent: str | ParsedURL, relative: str) -> ParsedURL:
-    """Given a parent URL and a relative URL, returns an absolute URL (as a ParsedURL)."""
+    """
+    Given a parent URL and a relative URL, returns an absolute 
+    URL (as a ParsedURL).
+    """
     if isinstance(parent, str):
         parent = parse_url(parent)
 
@@ -514,76 +578,83 @@ def absolute_url(parent: str | ParsedURL, relative: str) -> ParsedURL:
     new_path = posixpath.normpath(path + relative)
     return parse_url(base + new_path)
 
-def _parse_raw_hdrs(raw_headers):
-    headers_list = [[y.strip() for y in x.split(":", 1)] for x in raw_headers]
-    headers = Headers()
-    for k, v in headers_list:
-        headers.add(k, v)
-    return headers
+def _parse_http_headers(raw_headers):
+    raw_headers = raw_headers.decode("latin1").split("\r\n")
+    top = raw_headers.pop(0)
+    headers = Headers([
+        tuple(map(str.strip, x.split(":", 1))) for x in raw_headers
+    ])
 
-def urlopen(request_or_url: str | Request, 
-            *, follow_redirects: bool = True, processor: Processor = None, 
+    _, status, reason = top.split(" ", 2)
+    status = int(status)
+
+    return ((status, reason), headers)
+
+def _prep_http_request(parsed_url, request):
+    headers = request.headers.copy()
+    headers.setdefault("Host", parsed_url.hostname)
+    headers.setdefault("User-Agent", "smolurl")
+    headers.setdefault("Connection", "close")
+    headers.setdefault("Accept", "*/*")
+    if request.data:
+        headers.setdefault("Content-Type",
+                           "application/x-www-form-urlencoded")
+        headers.setdefault("Content-Length", str(len(request.data)))
+
+    fullpath = (parsed_url.pathname or "/") + \
+               ("?" + parsed_url.querystr if parsed_url.querystr else "")
+
+    top_line = f"{request.method} {fullpath} HTTP/1.0"
+    header_lines = "\r\n".join([f"{k}: {v}" for k, v in headers.items()])
+
+    return f"{top_line}\r\n{header_lines}\r\n\r\n{request.data}"
+
+def urlopen(request_or_url: str | Request,
+            *, follow_redirects: bool = True, processor: Processor = None,
             _redir=0) -> Response:
     """Creates a request and fetches the response."""
     if isinstance(request_or_url, str):
         request = Request(request_or_url)
     else:
-        request = request_or_url
-        
+        request = replace(request_or_url)
+
     parsed_url = parse_url(request.url)
-    
+
     is_https = parsed_url.protocol == "https"
     if parsed_url.protocol not in ("http", "https"):
         raise ValueError(f"Unsupported protocol: {parsed_url.protocol}")
 
     port = parsed_url.port or (443 if is_https else 80)
-    
+
     raw_socket = socket.socket()
     raw_socket.connect((parsed_url.hostname, port))
-    
+
     if is_https:
         context = ssl.create_default_context()
         s = context.wrap_socket(raw_socket, server_hostname= \
                                 parsed_url.hostname)
     else:
         s = raw_socket
-    
+
     try:
-        headers = request.headers.copy()
-        headers.setdefault("Host", parsed_url.hostname)
-        headers.setdefault("User-Agent", "smolurl")
-        headers.setdefault("Connection", "close")
-        headers.setdefault("Accept", "*/*")
-        headers.setdefault("Accept-Encoding", ", ".join(ACCEPT_ENCODINGS.keys()))
-        if request.data:
-            headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
-            headers.setdefault("Content-Length", str(len(request.data)))
-        
-        fullpath = (parsed_url.pathname or "/") + \
-                   ("?" + parsed_url.querystr if parsed_url.querystr else "")
-                   
-        top_line = f"{request.method} {fullpath} HTTP/1.0"
-        header_lines = "\r\n".join([f"{k}: {v}" for k, v in headers.items()])
-        http_request = f"{top_line}\r\n{header_lines}\r\n\r\n{request.data}"
-        s.send(http_request.encode("latin1", errors="replace"))
-        
+        s.send(_prep_http_request(parsed_url, request)
+               .encode("latin1", errors="replace"))
+
         data = b""
         while True:
             chunk = s.recv(256)
             if not chunk: break
             data += chunk
             if b"\r\n\r\n" in data: break
-            
+
         parts = data.split(b"\r\n\r\n", 1)
         if len(parts) == 2:
             raw_headers, body = parts
         else:
             raw_headers, body = parts[0], b""
 
-        raw_headers = raw_headers.decode("latin1").split("\r\n")
-        top = raw_headers.pop(0)
-        headers = _parse_raw_hdrs(raw_headers)
-        
+        (status, reason), headers = _parse_http_headers(raw_headers)
+
         if "Content-Length" in headers:
             length = int(headers["Content-Length"])
             while len(body) < length:
@@ -594,7 +665,7 @@ def urlopen(request_or_url: str | Request,
             # Fallback: Read until EOF if no Content-Length is provided
             while True:
                 chunk = s.recv(4096)
-                if not chunk: 
+                if not chunk:
                     break
                 body += chunk
     finally:
@@ -604,23 +675,20 @@ def urlopen(request_or_url: str | Request,
             raw_socket.close()
         except Exception:
             pass
-        
-    _, status, reason = top.split(" ", 2)
-    status = int(status)
-    
+
     if follow_redirects and 300 <= status < 400:
         # some people hate standards and send a 3xx without Location
         if "Location" in headers:
             if _redir > REDIR_LIMIT:
                 raise RuntimeError("Too many redirects")
-                
+
             return urlopen(
                 unparse_url(absolute_url(parsed_url, headers["Location"])),
                 follow_redirects=follow_redirects,
                 processor=processor,
                 _redir=_redir+1
             )
-    
+
     res = Response(
         url=request.url,
         status=status,
@@ -628,146 +696,124 @@ def urlopen(request_or_url: str | Request,
         headers=headers,
         body=body
     )
-    
+
     if processor:
         processor.process(res)
-    
+
     return res
+#
+async def aurlopen(request_or_url: str | Request,
+                   *, follow_redirects: bool = True,
+                   _redir=0) -> Response:
+    """Creates a request and streams the response asynchronously."""
+    if isinstance(request_or_url, str):
+        request = Request(request_or_url)
+    else:
+        request = replace(request_or_url)
 
-def wsgi_wrap(app):
-    class _WSGIWrapper:
-        def __init__(self, app):
-            self._app = app
-            self._code = 200
-            self._reason = "OK"
-            self._headers = Headers()
-            self._wbuf = io.BytesIO()
+    parsed_url = parse_url(request.url)
 
-        def __call__(self, req):
-            it = self._app(self._wsgi_environ(req), self._wsgi_start_response)
-            
-            for x in it:
-                self._wbuf.write(x)
-            
-            return Response(
-                status=self._code,
-                reason=self._reason,
-                headers=self._headers,
-                body=self._wbuf.getvalue()
+    is_https = parsed_url.protocol == "https"
+    if parsed_url.protocol not in ("http", "https"):
+        raise ValueError(f"Unsupported protocol: {parsed_url.protocol}")
+
+    port = parsed_url.port or (443 if is_https else 80)
+    reader, writer = await asyncio.open_connection(
+        parsed_url.hostname, port, ssl=is_https
+    )
+
+    request.headers["Accept-Encoding"] = "identity"
+
+    writer.write(_prep_http_request(parsed_url, request)
+                 .encode("latin1", errors="replace"))
+    await writer.drain()
+
+    raw_headers = b""
+    while True:
+        line = await reader.readline()
+        if not line or line == b"\r\n":
+            break
+        raw_headers += line
+
+    (status, reason), headers = _parse_http_headers(raw_headers.strip())
+
+    if follow_redirects and 300 <= status < 400:
+        # some people hate standards and send a 3xx without Location
+        if "Location" in headers:
+            writer.close()
+            await writer.wait_closed()
+
+            if _redir > REDIR_LIMIT:
+                raise RuntimeError("Too many redirects")
+
+            return await aurlopen(
+                unparse_url(absolute_url(parsed_url, headers["Location"])),
+                follow_redirects=True, _redir=_redir+1
             )
 
-        def _wsgi_environ(self, req):
-            url = parse_url(req.url)
-            environ = {
-                **os.environ,
-                "REQUEST_METHOD": req.method,
-                "SCRIPT_NAME": "",
-                "PATH_INFO": url.pathname,
-                "QUERY_STRING": url.querystr,
-                "SERVER_NAME": "localhost",
-                "SERVER_PORT": "80",
-                "SERVER_PROTOCOL": "HTTP/1.0",
-                "wsgi.version": (1, 0),
-                "wsgi.url_scheme": "http",
-                "wsgi.input": io.BytesIO(req.data.encode("latin1", 
-                              errors="replace")),
-                "wsgi.errors": sys.stderr,
-                "wsgi.multithread": False,
-                "wsgi.multiprocess": False,
-                "wsgi.run_once": False,
-                **{
-                    f"HTTP_{k.upper().replace("-", "_")}": ", ".join(
-                    req.headers.getall(k)) for k in req.headers.keys()
-                }
-            }
-            
-            if "Content-Type" in req.headers:
-                environ["CONTENT_TYPE"] = req.headers["Content-Type"]
-            
-            if "Content-Length" in req.headers:
-                environ["CONTENT_LENGTH"] = req.headers["Content-Length"]
-            
-            return environ
+    return StreamingResponse(
+        url=request.url,
+        status=status,
+        reason=reason,
+        headers=headers,
+        reader=reader,
+        writer=writer
+    )
 
-        def _wsgi_start_response(self, status, headers, exc_info=None):
-            code, reason = status.split(" ", 1)
-            self._code = int(code)
-            self._reason = reason
-            self._headers.extend(headers)
-            
-            return self._wbuf.write
+@asynccontextmanager
+async def make_sse_stream(request_or_url: str | Request,
+                          *, follow_redirects: bool = True):
+    class _SSEStream:
+        @dataclass
+        class EventContext:
+            evt: str = "message"
+            data: list[str] = field(default_factory=list)
 
-    def handler(req):
-        return _WSGIWrapper(app)(req)
+        def __init__(self, res):
+            self.res = res
+            self.onf = {}
+            self.ondefault = lambda evt, payload: None
 
-    return handler
+        def on(self, evt, do):
+            self.onf[evt] = do
 
-def http_server(handler, host="127.0.0.1", port=8080, use_threading=True):
-    s = socket.socket()
-    s.bind((host, port))
-    s.listen(5)
-    print(f"Serving on {host}:{port}")
-    
-    def thread(conn):
-        try:
-            data = b""
-            while True:
-                chunk = conn.recv(256)
-                if not chunk: break
-                data += chunk
-                if b"\r\n\r\n" in data: break
+        async def loop(self):
+            ctx = _SSEStream.EventContext()
+            async for ln in self.res.itertext():
+                if not ln:  # end of event
+                    if ctx.data:
+                        payload = "\n".join(ctx.data)
+                        if ctx.evt in self.onf:
+                            self.onf[ctx.evt](payload)
+                        else:
+                            self.ondefault(ctx.evt, payload)
+                    ctx = _SSEStream.EventContext()
+                    continue
 
-            parts = data.split(b"\r\n\r\n", 1)
-            raw_headers, body_bytes = parts if len(parts) == 2 else (parts[0], b"")
-            raw_headers = raw_headers.decode("latin1").split("\r\n")
-            top = raw_headers.pop(0)
-            headers = _parse_raw_hdrs(raw_headers)
+                if ln.startswith(":"):
+                    continue  # comment line
 
-            if "Content-Length" in headers:
-                length = int(headers["Content-Length"])
-                while len(body_bytes) < length:
-                    chunk = conn.recv(length - len(body_bytes))
-                    if not chunk: break
-                    body_bytes += chunk
+                if ":" not in ln:
+                    continue  # malformed
 
-            method, path, _ = top.split(" ", 2)
-            req = Request(url=f"http://{host}:{port}{path}", method=method,
-                          headers=headers, data=body_bytes.decode("latin1", 
-                          errors="replace"))
+                tp, data = ln.split(":", 1)
+                data = data.lstrip()  # strip leading space per SSE spec
 
-            try:
-                res = handler(req)
-            except Exception as e:
-                res = Response(
-                    status=500,
-                    reason="Internal Server Error",
-                    headers=Headers({"Content-Type": "text/plain; charset=utf-8"}),
-                    body=b"An error has occurred. Please contact the server administrator."
-                )
-                traceback.print_exception(e, file=sys.stderr)
+                if tp == "event":
+                    ctx.evt = data
+                elif tp == "data":
+                    ctx.data.append(data)
+                else:
+                    continue # not going to worry about retry or id
 
-            headers = res.headers.copy()
-            headers.setdefault("Server", "smolurl")
-            headers.setdefault("Connection", "close")
-            headers["Content-Length"] = str(len(res.body))
+            if ctx.data:
+                payload = "\n".join(ctx.data)
+                if ctx.evt in self.onf:
+                    self.onf[ctx.evt](payload)
+                else:
+                    self.ondefault(ctx.evt, payload)
 
-            top_line = f"HTTP/1.0 {res.status} {res.reason}"
-            header_lines = "\r\n".join([f"{k}: {v}" for k, v in headers.items()])
-            http_res = f"{top_line}\r\n{header_lines}\r\n\r\n".encode("latin1") + res.body
-
-            conn.sendall(http_res)
-            conn.close()
-
-            print("request:", req.method, req.url, repr(f"{res.status} {res.reason}"))
-        except ConnectionResetError:
-            pass
-    
-    while True:
-        try:
-            conn, addr = s.accept()
-            if use_threading:
-                threading.Thread(target=thread, args=(conn,)).start()
-            else:
-                thread(conn)
-        except KeyboardInterrupt:
-            return
+    async with await (await aurlopen(
+        request_or_url, follow_redirects=follow_redirects
+    )).unwrap() as res:
+        yield _SSEStream(res)

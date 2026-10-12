@@ -1,0 +1,4 @@
+[[headers]]
+  for = "/*.html"
+  [headers.values]
+    Content-Type = "text/html"

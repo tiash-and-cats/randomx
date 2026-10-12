@@ -13,14 +13,27 @@ class Special(Enum):
 
 @dataclass
 class Verbatim:
-    """Returnable by callback: replace the current input with another."""
+    """
+    Returnable by callback: replace the current input string with
+    another.
+    """
     s: str
 
-class _RawKeyReader:   
+class _RawKeyReader:
+    """
+    Read raw keys from the keyboard.
+    
+    On POSIX, this class has the side effect of changing the terminal
+    into raw mode. This means, among other things, that you must use
+    '\\r\\n' instead of '\\n' when printing to the terminal. This is
+    done to safe performance by not switching the terminal from
+    cooked to raw and raw to cooked each keypress.
+    """
     if sys.platform == "win32":
         def get(self):
             import msvcrt
             ch = msvcrt.getwch()
+            
             if ch in ("\x00", "\xe0"):  # special key prefix
                 ch2 = msvcrt.getwch()
                 return {
@@ -29,7 +42,8 @@ class _RawKeyReader:
                     "S": Special.DEL,
                     "H": Special.UP,
                     "P": Special.DOWN,
-                }.get(ch2, ch2)
+                }.get(ch2, ch + ch2)
+                
             return ch
         
         def __enter__(self): 
@@ -50,18 +64,23 @@ class _RawKeyReader:
         
         def get(self):
             ch = sys.stdin.read(1)
+            
             if ch == "\x1b":  # escape sequence
                 seq = sys.stdin.read(2)
+                
                 key = {
                     "[D": Special.LEFT,
                     "[C": Special.RIGHT,
                     "[A": Special.UP,
                     "[B": Special.DOWN,
                     "[3": Special.DEL,
-                }.get(seq, ch+seq)
+                }.get(seq, ch + seq)
+                
                 if key == Special.DEL:
                     sys.stdin.read(1)
+                    
                 return key
+                
             return ch
 
 class _NoLineWrapping:
@@ -150,8 +169,8 @@ def finput(prompt="", *, callback=None, displayer=lambda s: s):
     the specified string.
     
     displayer is a callback called to colorize the input for displaying.
-    It takes one argument: the input. For example, minrepl.FancyRepl uses 
-    it to syntax-highlight the input using minrepl.fygment.highlight. 
+    It takes one argument, the input. For example, minrepl.FancyRepl uses 
+    it to syntax-highlight the input using fygment.highlight. 
     """
     # Define data-model for an input-string with a cursor
     promptlen = len(_ANSI_RE.sub("", prompt))

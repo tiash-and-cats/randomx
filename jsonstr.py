@@ -52,6 +52,6 @@ def dumps(obj, *, indent=0, _prvidt=0, replacer=None):
                     f"replacer returned unsupported type {type(obj)}"
                 )
             
-            return dumps(x, indent=indent, _prvidt=_prvidt)
+            return dumps(x, indent=indent, _prvidt=_prvidt, replacer=replacer)
             
         raise TypeError(f"unsupported object type {type(obj)}")

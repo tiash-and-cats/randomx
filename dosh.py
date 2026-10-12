@@ -19,9 +19,7 @@ RE_FOREVER_COMMAND = r"(?s)forever\s*{(?P<body>.*)}"
 RE_TRY_COMMAND = r"(?s)try\s*{(?P<body>.*)}"
 RE_BLOCKS = r"({.*?}|\[.*?])"
 
-gvarses = collections.ChainMap({
-    "SHELL": "dosh"
-}, os.environ)
+gvarses = collections.ChainMap({}, os.environ)
 
 gprocs = collections.ChainMap()
 

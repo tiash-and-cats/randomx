@@ -24,16 +24,20 @@ are active in your environment.
 
 OLD API NOTICE: There is a new API based on namespaces. The old API
 with top-level things is available, but it is just aliases to the new
-API now.
+API now. New aliases will be made as the few things that are in the
+global scope are put in namespaces, but none will be made for new
+features.
 
 ======== Quickstart! ======
 
 smolurl is organized into namespaces:
+    - 'smolurl.errors': Exceptions raised by smolurl
+    - 'smolurl.headers': Classes related to HTTP headers
     - 'smolurl.parse': URL parsing
     - 'smolurl.request': sending HTTP requests and getting 
     - 'smolurl.processors': A Processor is a class that processes the
       Response before returning it to the end user.
-    - Some stuff is still on the top level.
+    - 'smolurl.sse': Utilities for SSE streams.
 
 To send an HTTP request and get the response:
 
@@ -70,7 +74,7 @@ pathname='/oops', querystr='x=1', fragment='demo')
 
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
-from collections.abc import MutableMapping
+from collections.abc import MutableMapping, Mapping
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from http import HTTPStatus
@@ -101,7 +105,7 @@ content_type_regex = re.compile(r"^(?P<type>[A-Za-z0-9.+-]+\/[A-Za-z0-9.+-]+)"
 
 REDIR_LIMIT = 5
 
-class _supportmeta(type):
+class _supportmeta(type):    
     def __repr__(self):
         s = []
         
@@ -119,6 +123,13 @@ class _supportmeta(type):
             s.append("no optional features available")
         
         return "\n".join([f"- {x}" for x in s])
+    
+    # backwards compatibility: when brotlicffi was unsupported,
+    # there was a simple BROTLI_ENC boolean showing support for
+    # brotli.
+    @property
+    def BROTLI_ENC(self):
+        return self.BROTLI_TYPE != "none"
 
 def _namespace(cls=None, no_repr=False):
     import inspect
@@ -234,6 +245,26 @@ try:
 except ModuleNotFoundError:
     SSL_CERT = None
 
+@_namespace
+class errors:
+    """Namespace of errors raised by smolurl."""
+    
+    class Error(Exception):
+        """Base exception for smolurl errors."""
+        pass
+    
+    class ValidationError(Error, ValueError):
+        """Something didn't have an expected value."""
+        pass
+    
+    class RedirectError(Error, RuntimeError):
+        """Too many redirects."""
+        pass
+    
+    class InvalidURLError(ValidationError):
+        """Invalid URL."""
+        pass
+
 # ========= This section of code has been modified from webob.multidict
 # Original copyright:
 # (c) 2005 Ian Bicking and contributors; written for Paste
@@ -250,218 +281,384 @@ def _hide_passwd(items):
         else:
             yield k, v
 
-class Headers(MutableMapping):
-    """
-    A specialized dictionary for storing request/response headers.
-    Each key can have multiple values and keys are accessed
-    case-insensitively.
-
-    >>> h = Headers()
-    >>> h["Content-Type"] = "text/html"
-    >>> h["content-type"]
-    'text/html'
-
-    >>> h.add("Set-Cookie", "a=1")
-    >>> h.add("Set-Cookie", "b=2")
-    >>> h.getall("set-cookie")
-    ['a=1', 'b=2']
-
-    >>> h.getone("set-cookie")
-    Traceback (most recent call last):
-        ...
-    KeyError: "Multiple values match 'set-cookie': ['a=1', 'b=2']"
-
-    >>> h.mixed()
-    {'Content-Type': 'text/html', 'Set-Cookie': ['a=1', 'b=2']}
-
-    >>> h.dict_of_lists()
-    {'Content-Type': ['text/html'], 'Set-Cookie': ['a=1', 'b=2']}
-
-    >>> del h["CONTENT-TYPE"]
-    >>> "content-type" in h
-    False
-    """
-
-    def __init__(self, a=None, **kw):
-        self._items = []
-        if a:
-            self.extend(a)
-        if kw:
-            self._items.extend(kw.items())
-
-    @classmethod
-    def view_list(cls, lst):
+@_namespace
+class headers:
+    """Namespace of classes relating to HTTP headers."""
+    
+    class Headers(MutableMapping):
         """
-        Create a Headers that is a view on the given list
-        """
-        if not isinstance(lst, list):
-            raise TypeError(
-                "%s.view_list(obj) takes only actual list objects, not %r"
-                % (cls.__name__, lst))
-        obj = cls()
-        obj._items = lst
-        return obj
+        A specialized dictionary for storing request headers.
+        Each key can have multiple values and keys are accessed
+        case-insensitively.
 
-    def __getitem__(self, key):
-        for k, v in reversed(self._items):
-            if k.lower() == key.lower():
-                return v
-        raise KeyError(key)
+        >>> h = Headers()
+        >>> h["Content-Type"] = "text/html"
+        >>> h["content-type"]
+        'text/html'
 
-    def __setitem__(self, key, value):
-        try:
-            del self[key]
-        except KeyError:
-            pass
-        self._items.append((key, value))
+        >>> h.add("Set-Cookie", "a=1")
+        >>> h.add("Set-Cookie", "b=2")
+        >>> h.getall("set-cookie")
+        ['a=1', 'b=2']
 
-    def add(self, key, value):
-        """
-        Add the key and value, not overwriting any previous value.
-        """
-        self._items.append((key, value))
+        >>> h.getone("set-cookie")
+        Traceback (most recent call last):
+            ...
+        KeyError: "Multiple values match 'set-cookie': ['a=1', 'b=2']"
 
-    def getall(self, key):
-        """
-        Return a list of all values matching the key (may be an empty list)
-        """
-        return [v for k, v in self._items if k.lower() == key.lower()]
+        >>> h.mixed()
+        {'Content-Type': 'text/html', 'Set-Cookie': ['a=1', 'b=2']}
 
-    def getone(self, key):
-        """
-        Get one value matching the key, raising a KeyError if multiple
-        values were found.
-        """
-        v = self.getall(key)
-        if not v:
-            raise KeyError('Key not found: %r' % key)
-        if len(v) > 1:
-            raise KeyError('Multiple values match %r: %r' % (key, v))
-        return v[0]
+        >>> h.dict_of_lists()
+        {'Content-Type': ['text/html'], 'Set-Cookie': ['a=1', 'b=2']}
 
-    def mixed(self):
+        >>> del h["CONTENT-TYPE"]
+        >>> "content-type" in h
+        False
         """
-        Returns a dictionary where the values are either single
-        values, or a list of values when a key/value appears more than
-        once in this dictionary.  This is similar to the kind of
-        dictionary often used to represent the variables in a web
-        request.
-        """
-        result = {}
-        multi = {}
-        for key, value in self.items():
-            if key in result:
-                # We do this to not clobber any lists that are
-                # *actual* values in this dictionary:
-                if key in multi:
-                    result[key].append(value)
+
+        def __init__(self, a=None, **kw):
+            self._items = []
+            if a:
+                self.extend(a)
+            if kw:
+                self._items.extend(kw.items())
+
+        @classmethod
+        def view_list(cls, lst):
+            """
+            Create a Headers that is a view on the given list
+            """
+            if not isinstance(lst, list):
+                raise TypeError(
+                    "%s.view_list(obj) takes only actual list objects, not %r"
+                    % (cls.__name__, lst))
+            obj = cls()
+            obj._items = lst
+            return obj
+
+        def __getitem__(self, key):
+            for k, v in reversed(self._items):
+                if k.lower() == key.lower():
+                    return v
+            raise KeyError(key)
+
+        def __setitem__(self, key, value):
+            try:
+                del self[key]
+            except KeyError:
+                pass
+            self._items.append((key, value))
+
+        def add(self, key, value):
+            """
+            Add the key and value, not overwriting any previous value.
+            """
+            self._items.append((key, value))
+
+        def getall(self, key):
+            """
+            Return a list of all values matching the key (may be an empty list)
+            """
+            return [v for k, v in self._items if k.lower() == key.lower()]
+
+        def getone(self, key):
+            """
+            Get one value matching the key, raising a KeyError if multiple
+            values were found.
+            """
+            v = self.getall(key)
+            if not v:
+                raise KeyError('Key not found: %r' % key)
+            if len(v) > 1:
+                raise KeyError('Multiple values match %r: %r' % (key, v))
+            return v[0]
+
+        def mixed(self):
+            """
+            Returns a dictionary where the values are either single
+            values, or a list of values when a key/value appears more than
+            once in this dictionary.  This is similar to the kind of
+            dictionary often used to represent the variables in a web
+            request.
+            """
+            result = {}
+            multi = {}
+            for key, value in self.items():
+                if key in result:
+                    # We do this to not clobber any lists that are
+                    # *actual* values in this dictionary:
+                    if key in multi:
+                        result[key].append(value)
+                    else:
+                        result[key] = [result[key], value]
+                        multi[key] = None
                 else:
-                    result[key] = [result[key], value]
-                    multi[key] = None
+                    result[key] = value
+            return result
+
+        def dict_of_lists(self):
+            """
+            Returns a dictionary where each key is associated with a list of values.
+            """
+            r = {}
+            for key, val in self.items():
+                r.setdefault(key, []).append(val)
+            return r
+
+        def __delitem__(self, key):
+            items = self._items
+            found = False
+            for i in range(len(items)-1, -1, -1):
+                if items[i][0].lower() == key.lower():
+                    del items[i]
+                    found = True
+            if not found:
+                raise KeyError(key)
+
+        def __contains__(self, key):
+            for k, v in self._items:
+                if k.lower() == key.lower():
+                    return True
+            return False
+
+        has_key = __contains__
+
+        def clear(self):
+            del self._items[:]
+
+        def copy(self):
+            return self.__class__(self)
+
+        def setdefault(self, key, default=None):
+            for k, v in self._items:
+                if key == k:
+                    return v
+            self._items.append((key, default))
+            return default
+
+        def pop(self, key, *args):
+            if len(args) > 1:
+                raise TypeError("pop expected at most 2 arguments, got %s"
+                                 % repr(1 + len(args)))
+            for i in range(len(self._items)):
+                if self._items[i][0] == key:
+                    v = self._items[i][1]
+                    del self._items[i]
+                    return v
+            if args:
+                return args[0]
             else:
-                result[key] = value
-        return result
+                raise KeyError(key)
 
-    def dict_of_lists(self):
-        """
-        Returns a dictionary where each key is associated with a list of values.
-        """
-        r = {}
-        for key, val in self.items():
-            r.setdefault(key, []).append(val)
-        return r
+        def popitem(self):
+            return self._items.pop()
 
-    def __delitem__(self, key):
-        items = self._items
-        found = False
-        for i in range(len(items)-1, -1, -1):
-            if items[i][0].lower() == key.lower():
-                del items[i]
-                found = True
-        if not found:
+        def extend(self, other=None, **kwargs):
+            if other is None:
+                pass
+            elif hasattr(other, 'items'):
+                self._items.extend(other.items())
+            elif hasattr(other, 'keys'):
+                for k in other.keys():
+                    self._items.append((k, other[k]))
+            else:
+                for k, v in other:
+                    self._items.append((k, v))
+            if kwargs:
+                self.update(kwargs)
+
+        def __repr__(self):
+            items = map('(%r, %r)'.__mod__, _hide_passwd(self.items()))
+            return '%s([%s])' % (self.__class__.__name__, ', '.join(items))
+
+        def __len__(self):
+            return len(self._items)
+
+        ##
+        ## All the iteration:
+        ##
+
+        def iterkeys(self):
+            for k, v in self._items:
+                yield k
+
+        keys = iterkeys
+
+        __iter__ = iterkeys
+
+        def iteritems(self):
+            return iter(self._items)
+
+        items = iteritems
+
+        def itervalues(self):
+            for k, v in self._items:
+                yield v
+
+        values = itervalues
+
+    class FrozenHeaders(Mapping):
+        """
+        A specialized frozen dictionary for storing response headers.
+        Each key can have multiple values and keys are accessed
+        case-insensitively.
+
+        >>> h = FrozenHeaders([
+        ...     ("content-type", "text/html"),
+        ...     ("set-cookie", "a=1"),
+        ...     ("set-cookie", "b=2"),
+        ... ])
+        ...
+        
+        >>> h["content-tyPe"]
+        'text/html'
+        
+        >>> h["Content-Type"] = "text/html"
+        Traceback (most recent call last):
+          ...
+        TypeError: 'FrozenHeaders' object does not support item assignment
+
+        >>> h.getall("set-cookie")
+        ['a=1', 'b=2']
+
+        >>> h.getone("set-cookie")
+        Traceback (most recent call last):
+            ...
+        KeyError: "Multiple values match 'set-cookie': ['a=1', 'b=2']"
+
+        >>> h.mixed()
+        {'Content-Type': 'text/html', 'Set-Cookie': ['a=1', 'b=2']}
+
+        >>> h.dict_of_lists()
+        {'Content-Type': ['text/html'], 'Set-Cookie': ['a=1', 'b=2']}
+        """
+
+        def __init__(self, other=None, **kw):
+            self._items = ()
+            
+            if other:
+                if other is None:
+                    pass
+                elif hasattr(other, 'items'):
+                    self._items += other.items()
+                elif hasattr(other, 'keys'):
+                    for k in other.keys():
+                        self._items += ((k, other[k]),)
+                else:
+                    for k, v in other:
+                        self._items += ((k, v),)
+            
+            if kw:
+                self._items += kw.items()
+
+        def __getitem__(self, key):
+            for k, v in reversed(self._items):
+                if k.lower() == key.lower():
+                    return v
             raise KeyError(key)
 
-    def __contains__(self, key):
-        for k, v in self._items:
-            if k.lower() == key.lower():
-                return True
-        return False
+        def getall(self, key):
+            """
+            Return a list of all values matching the key (may be an empty list)
+            """
+            return [v for k, v in self._items if k.lower() == key.lower()]
 
-    has_key = __contains__
+        def getone(self, key):
+            """
+            Get one value matching the key, raising a KeyError if multiple
+            values were found.
+            """
+            v = self.getall(key)
+            if not v:
+                raise KeyError('Key not found: %r' % key)
+            if len(v) > 1:
+                raise KeyError('Multiple values match %r: %r' % (key, v))
+            return v[0]
 
-    def clear(self):
-        del self._items[:]
+        def mixed(self):
+            """
+            Returns a dictionary where the values are either single
+            values, or a list of values when a key/value appears more than
+            once in this dictionary.  This is similar to the kind of
+            dictionary often used to represent the variables in a web
+            request.
+            """
+            result = {}
+            multi = {}
+            for key, value in self.items():
+                if key in result:
+                    # We do this to not clobber any lists that are
+                    # *actual* values in this dictionary:
+                    if key in multi:
+                        result[key].append(value)
+                    else:
+                        result[key] = [result[key], value]
+                        multi[key] = None
+                else:
+                    result[key] = value
+            return result
 
-    def copy(self):
-        return self.__class__(self)
+        def dict_of_lists(self):
+            """
+            Returns a dictionary where each key is associated with a list
+            of values.
+            """
+            r = {}
+            for key, val in self.items():
+                r.setdefault(key, []).append(val)
+            return r
 
-    def setdefault(self, key, default=None):
-        for k, v in self._items:
-            if key == k:
-                return v
-        self._items.append((key, default))
-        return default
+        def __contains__(self, key):
+            for k, v in self._items:
+                if k.lower() == key.lower():
+                    return True
+            return False
 
-    def pop(self, key, *args):
-        if len(args) > 1:
-            raise TypeError("pop expected at most 2 arguments, got %s"
-                             % repr(1 + len(args)))
-        for i in range(len(self._items)):
-            if self._items[i][0] == key:
-                v = self._items[i][1]
-                del self._items[i]
-                return v
-        if args:
-            return args[0]
-        else:
-            raise KeyError(key)
+        has_key = __contains__
 
-    def popitem(self):
-        return self._items.pop()
+        def __repr__(self):
+            items = map('(%r, %r)'.__mod__, _hide_passwd(self.items()))
+            return '%s([%s])' % (self.__class__.__name__, ', '.join(items))
 
-    def extend(self, other=None, **kwargs):
-        if other is None:
-            pass
-        elif hasattr(other, 'items'):
-            self._items.extend(other.items())
-        elif hasattr(other, 'keys'):
-            for k in other.keys():
-                self._items.append((k, other[k]))
-        else:
-            for k, v in other:
-                self._items.append((k, v))
-        if kwargs:
-            self.update(kwargs)
+        def __len__(self):
+            return len(self._items)
 
-    def __repr__(self):
-        items = map('(%r, %r)'.__mod__, _hide_passwd(self.items()))
-        return '%s([%s])' % (self.__class__.__name__, ', '.join(items))
+        ##
+        ## All the iteration:
+        ##
 
-    def __len__(self):
-        return len(self._items)
+        def iterkeys(self):
+            for k, v in self._items:
+                yield k
 
-    ##
-    ## All the iteration:
-    ##
+        keys = iterkeys
 
-    def iterkeys(self):
-        for k, v in self._items:
-            yield k
+        __iter__ = iterkeys
 
-    keys = iterkeys
+        def iteritems(self):
+            return iter(self._items)
 
-    __iter__ = iterkeys
+        items = iteritems
 
-    def iteritems(self):
-        return iter(self._items)
+        def itervalues(self):
+            for k, v in self._items:
+                yield v
 
-    items = iteritems
-
-    def itervalues(self):
-        for k, v in self._items:
-            yield v
-
-    values = itervalues
+        values = itervalues
+        
+        ##
+        ## Hashing and equality
+        ##
+        
+        def __hash__(self):
+            return hash(self._items)
+        
+        def __eq__(self, other):
+            if not isinstance(other, type(self)):
+                return NotImplemented
+            
+            return hash(self) == hash(other)
 
 # ========= End of modified webob.multidict code ======================
 
@@ -492,14 +689,14 @@ def _charset(headers):
 def _parse_http_headers(raw_headers):
     raw_headers = raw_headers.decode("latin1").split("\r\n")
     top = raw_headers.pop(0)
-    headers = Headers([
+    headrs = headers.FrozenHeaders([
         tuple(map(str.strip, x.split(":", 1))) for x in raw_headers
     ])
 
     _, status, reason = top.split(" ", 2)
     status = int(status)
 
-    return ((status, reason), headers)
+    return ((status, reason), headrs)
 
 def _prep_http_request(parsed_url, request):
     headers = request.headers.copy()
@@ -528,6 +725,19 @@ def _ssl_context():
     
     return context
 
+def _make_request(request_or_url):
+    if isinstance(request_or_url, str):
+        return request.Request(request_or_url)
+    elif isinstance(request_or_url, parse.ParsedURL):
+        return request.Request(parse.unparse_url(request_or_url))
+    elif isinstance(request_or_url, request.Request):
+        return replace(request_or_url)
+    else:
+        raise TypeError(
+            "Expected request_or_url argument to be str, request.Request, "
+            "or parse.ParsedURL, got " + type(request_or_url).__name__
+        )
+
 @_namespace
 class request:
     """A namespace of helpers for sending HTTP requests."""
@@ -537,7 +747,7 @@ class request:
         """A dataclass representing a request."""
         url: str
         method: str = "GET"
-        headers: Headers = field(default_factory=Headers)
+        headers: headers.Headers = field(default_factory=headers.Headers)
         data: str = ""
 
     @dataclass(frozen=True)
@@ -595,14 +805,18 @@ class request:
         url: str
         status: int
         reason: str
-        headers: Headers
+        headers: headers.FrozenHeaders
         body: bytes
 
         @property
         def ok(self) -> bool:
+            """Checks if request was successful."""
             return self.status < 400
 
         def unwrap(self):
+            """
+            Raises an error if request failed, otherwise returns self.
+            """
             if not self.ok:
                 status_info = http.HTTPStatus(self.status)
                 raise ValueError(f"{self.status} {status_info.phrase}: {
@@ -611,6 +825,10 @@ class request:
             return self
 
         def expect(self, msg):
+            """
+            Raises an error with custom error message if request
+            failed, otherwise returns self.
+            """
             if not self.ok:
                 raise ValueError(f"{msg} ({self.status} {
                                  http.HTTPStatus(self.status).phrase})")
@@ -632,6 +850,9 @@ class request:
         
         def itertext(self):
             return self.text().split("\n")
+        
+        def __enter__(self): return self
+        def __exit__(self, *exc_info): return None
 
     @dataclass(frozen=True)
     class StreamingResponse:
@@ -675,49 +896,67 @@ class request:
         >>> s.unwrap() is s
         True
 
-        # decmp returns raw bytes
+        # decmp returns raw decoded bytes
+        # (does not really make sense as aurlopen sends 
+        # Accept-Encoding: identity anyway, but oh well)
         >>> asyncio.run(s.decmp())
         b'stream test'
 
         # text returns decoded string
-        >>> asyncio.run(s.text())
+        # (only works if body has not been consumed)
+        >>> asyncio.run(s.text()) # doctest: +SKIP
         'stream test'
         """
         url: str
         status: int
         reason: str
-        headers: Headers
+        headers: headers.FrozenHeaders
         reader: asyncio.StreamReader
         writer: asyncio.StreamWriter
 
         @property
         def ok(self) -> bool:
+            """Checks if request was successful."""
             return self.status < 400
 
         def unwrap(self):
+            """
+            Raises an error if request failed, otherwise returns self.
+            """
             if not self.ok:
                 status_info = http.HTTPStatus(self.status)
-                raise ValueError(f"{self.status} {status_info.phrase}: {
-                                 status_info.description}")
+                raise errors.ValidationError(
+                    f"{self.status} {status_info.phrase}: {
+                    status_info.description}"
+                )
 
             return self
 
-        def expect(self, msg):
+        def expect(self, msg, exc=ValueError):
+            """
+            Raises an error with custom error message and custom error
+            type if request failed, otherwise returns self.
+            """
             if not self.ok:
-                raise ValueError(f"{msg} ({self.status} {
-                                 http.HTTPStatus(self.status).phrase})")
+                raise exc(msg)
+                
             return self
 
         async def __aenter__(self):
             return self
 
-        async def __aexit__(self, *_):
+        async def __aexit__(self, *exc_info):
             try:
                 self.writer.close()
                 await self.writer.wait_closed()
             except: pass
+            
+            return None
 
         async def iterbody(self):
+            """
+            Stream and iterate over raw body.
+            """
             while True:
                 line = await self.reader.readline()
                 if not line:
@@ -727,39 +966,63 @@ class request:
         __aiter__ = iterbody
 
         async def itertext(self):
+            """
+            Stream and iterate over decoded text.
+            """
             charset = _charset(self.headers)
 
             async for line in self:
                 yield line.decode(charset, errors="replace")
 
         async def body(self):
+            """
+            Accumulate body and return it.
+            """
             x = b""
             async for ln in self:
                 x += ln
             return x
 
         async def decmp(self):
+            """
+            Accumulate and decompress body.
+            
+            I realize this doesn't really make sense as aurlopen
+            sends Accept-Encoding: identity anyway, but oh well.
+            """
             return _decomp(await self.body(), self.headers)
 
         async def text(self):
+            """
+            Accumulate, decompress and decode body into text.
+            """
             return (await self.decmp()).decode(_charset(self.headers),
                                                errors="replace")
 
-    def urlopen(request_or_url: str | Request,
+    def urlopen(request_or_url: str | Request | parse.ParsedURL,
                 *, follow_redirects: bool = True, 
                 processor: processor.Processor = None, _redir=0) -> Response:
-        """Creates a request and fetches the response."""
-        if isinstance(request_or_url, str):
-            req = request.Request(request_or_url)
-        else:
-            req = replace(request_or_url)
+        """
+        Sends a request and fetches the response.
 
+        >>> from smolurl import request
+        >>> r = request.urlopen("https://example.com")
+        >>> r.ok
+        True
+        >>> r.status
+        200
+        >>> "Example Domain" in r.text()
+        True
+        """
+        req = _make_request(request_or_url)
         parsed_url = parse.parse_url(req.url)
 
-        is_https = parsed_url.protocol == "https"
         if parsed_url.protocol not in ("http", "https"):
-            raise ValueError(f"Unsupported protocol: {parsed_url.protocol}")
-
+            raise errors.ValidationError(
+                f"Unsupported protocol: {parsed_url.protocol}"
+            )
+            
+        is_https = parsed_url.protocol == "https"
         port = parsed_url.port or (443 if is_https else 80)
 
         raw_socket = socket.socket()
@@ -819,9 +1082,7 @@ class request:
                     raise RuntimeError("Too many redirects")
 
                 return request.urlopen(
-                    parse.unparse_url(
-                        parse.absolute_url(parsed_url, headers["Location"])
-                    ),
+                    parse.absolute_url(parsed_url, headers["Location"]),
                     follow_redirects=follow_redirects,
                     processor=processor,
                     _redir=_redir+1
@@ -840,21 +1101,30 @@ class request:
 
         return res
     #
-    async def aurlopen(request_or_url: str | Request,
+    async def aurlopen(request_or_url: str | Request | parse.ParsedURL,
                        *, follow_redirects: bool = True,
                        _redir=0) -> Response:
-        """Creates a request and streams the response asynchronously."""
-        if isinstance(request_or_url, str):
-            req = request.Request(request_or_url)
-        else:
-            req = replace(request_or_url)
-
+        """
+        Creates a request and streams the response asynchronously.
+        
+        >>> import asyncio
+        >>> from smolurl import request
+        >>> # Run aurlopen against a known URL
+        >>> resp = asyncio.run(request.aurlopen("https://example.com"))
+        >>> resp.ok
+        True
+        >>> isinstance(resp, request.StreamingResponse)
+        True
+        """
+        req = _make_request(request_or_url)
         parsed_url = parse.parse_url(req.url)
 
-        is_https = parsed_url.protocol == "https"
         if parsed_url.protocol not in ("http", "https"):
-            raise ValueError(f"Unsupported protocol: {parsed_url.protocol}")
-
+            raise errors.ValidationError(
+                f"Unsupported protocol: {parsed_url.protocol}"
+            )
+            
+        is_https = parsed_url.protocol == "https"
         port = parsed_url.port or (443 if is_https else 80)
         
         if is_https:
@@ -888,7 +1158,7 @@ class request:
                 await writer.wait_closed()
 
                 if _redir > REDIR_LIMIT:
-                    raise RuntimeError("Too many redirects")
+                    raise errors.RedirectError("Too many redirects")
 
                 return await request.aurlopen(
                     parse.unparse_url(
@@ -925,10 +1195,17 @@ class parse:
             return replace(self, **kwargs)
 
     def parse_url(url: str) -> ParsedURL:
-        """Parses a URL into individual components and returns a ParsedURL."""
+        """
+        Parses a URL into individual components and returns a ParsedURL.
+        
+        >>> parse_url("https://example.org/oops?x=1#demo")
+        parse.ParsedURL(protocol='https', hostname='example.org', \
+port=None, pathname='/oops', querystr='x=1', fragment='demo')
+        """
         m = url_regex.match(url)
+        
         if not m:
-            raise ValueError(f"Invalid URL: {url}")
+            raise errors.InvalidURLError(f"Invalid URL: {url}")
 
         protocol = m.group("protocol")
         hostname = m.group("hostname")
@@ -947,7 +1224,15 @@ class parse:
         )
 
     def unparse_url(parsed_url: ParsedURL) -> str:
-        """Joins a parsed URL back into a string."""
+        r"""
+        Joins a parsed URL back into a string.
+        
+        >>> import smolurl
+        >>> unparse_url(smolurl.parse.ParsedURL(protocol='https',
+        ... hostname='example.org', port=None, pathname='/oops',
+        ... querystr='x=1', fragment='demo'))
+        'https://example.org/oops?x=1#demo'
+        """
         url = f"{parsed_url.protocol}://{parsed_url.hostname}"
         if parsed_url.port: url += f":{parsed_url.port}"
         if parsed_url.pathname: url += parsed_url.pathname
@@ -1091,12 +1376,20 @@ class processors:
             for set_cookie in res.headers.getall("Set-Cookie"):
                 self.parse_set_cookie(set_cookie, parsed_url)
 
-@asynccontextmanager
-async def make_sse_stream(request_or_url: str | Request,
-                          *, follow_redirects: bool = True):
-    class _SSEStream:
+@_namespace
+class sse:
+    """Utilities for Server-Sent Event (SSE) streams."""
+
+    class SSEStream:
+        """
+        A class representing an SSE stream.
+        
+        Set ondefault to a callable accepting a string event
+        and string payload to have that callable called when
+        an event has no handler.
+        """
         @dataclass
-        class EventContext:
+        class _EventContext:
             evt: str = "message"
             data: list[str] = field(default_factory=list)
 
@@ -1106,10 +1399,18 @@ async def make_sse_stream(request_or_url: str | Request,
             self.ondefault = lambda evt, payload: None
 
         def on(self, evt, do):
+            """
+            Attach an event, such as 'message' or 'error', to a function
+            accepting an argument which is the string data associated with
+            the event.
+            """
             self.onf[evt] = do
 
         async def loop(self):
-            ctx = _SSEStream.EventContext()
+            """
+            Loop through the stream and call event handlers.
+            """
+            ctx = SSEStream._EventContext()
             async for ln in self.res.itertext():
                 if not ln:  # end of event
                     if ctx.data:
@@ -1118,7 +1419,7 @@ async def make_sse_stream(request_or_url: str | Request,
                             self.onf[ctx.evt](payload)
                         else:
                             self.ondefault(ctx.evt, payload)
-                    ctx = _SSEStream.EventContext()
+                    ctx = SSEStream._EventContext()
                     continue
 
                 if ln.startswith(":"):
@@ -1144,10 +1445,23 @@ async def make_sse_stream(request_or_url: str | Request,
                 else:
                     self.ondefault(ctx.evt, payload)
 
-    async with (await request.aurlopen(
-        request_or_url, follow_redirects=follow_redirects
-    )).unwrap() as res:
-        yield _SSEStream(res)
+    @asynccontextmanager
+    async def make_sse_stream(request_or_url: str | request.Request,
+                              **other_aurlopen_kwargs):
+        """
+        Starts a streaming HTTP request and yields an sse.SSEStream
+        object representing the SSE stream.
+        """
+        async with (await request.aurlopen(
+            request_or_url, **other_aurlopen_kwargs
+        )).unwrap() as res:
+            if res.headers["Content-Type"] != "text/event-stream":
+                raise errors.ValidationError(
+                    "Content-Type of an SSE stream must be "
+                    "text/event-stream"
+                )
+            
+            yield sse.SSEStream(res)
 
 # Legacy aliases
 CookieJar = processors.CookieJar
@@ -1156,19 +1470,21 @@ Processor = processors.Processor
 Request = request.Request
 Response = request.Response
 StreamingResponse = request.StreamingResponse
+Headers = headers.Headers
 
 urlopen = request.urlopen
 aurlopen = request.aurlopen
 parse_url = parse.parse_url
 unparse_url = parse.unparse_url
 absolute_url = parse.absolute_url
+make_sse_stream = sse.make_sse_stream
 
 __all__ = [
-    "request", "processors", "parse", 
+    "request", "processors", "parse", "headers", "errors",
     
     "CookieJar", "ParsedURL", "Processor", "Request", "Response",
     "StreamingResponse", "urlopen", "aurlopen", "parse_url",
-    "unparse_url", "absolute_url"
+    "unparse_url", "absolute_url", "Headers", "make_sse_stream"
 ]
 
 if __name__ == "__main__":

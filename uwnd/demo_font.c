@@ -30,7 +30,7 @@ int main(void) {
             0,
             win->framebuffer.width,
             win->framebuffer.height,
-            0x202020
+            0xFF202020
         );
 
         win->framebuffer.text(
@@ -42,7 +42,7 @@ int main(void) {
 
             24,
 
-            0xFFFFFF,
+            0xFFFFFFFF,
 
             "Hello, µWnd!"
         );

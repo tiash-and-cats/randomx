@@ -1,4 +1,4 @@
-#include "../uwnd.h"
+#include "uwnd.h"
 #include <stdbool.h>
 
 bool uwnd__platform_init_Window(
@@ -26,4 +26,6 @@ char* uwnd__platform_find_Font(const char* name);
     #include "./plat/win32.c"
 #elif defined(__linux__)
     #include "./plat/x11.c"
+#elif defined(__EMSCRIPTEN__)
+    #include "./plat/emscripten.c"
 #endif

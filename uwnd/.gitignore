@@ -1,2 +1,5 @@
 uwnd/uwnd_core/stb 
 wgpu/
+*.exe 
+*.obj 
+build 

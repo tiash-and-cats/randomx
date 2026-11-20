@@ -7,8 +7,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-#include "../../uwnd.h"
-#include "../fb.c"
+#include "uwnd.h"
 
 typedef struct uwnd__PlatData {
     Display* display;

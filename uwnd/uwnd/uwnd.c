@@ -1,4 +1,6 @@
 #include "uwnd.h"
+
+#include "uwnd_core/img.c"
 #include "uwnd_core/plat.c"
 
 uwnd_Window* uwnd_new_Window(

@@ -181,7 +181,7 @@ class support(metaclass=_supportmeta):
     ZSTD_TYPE is the module used to provide Zstandard decompression for the
     'zstd' encoding or 'none'.
     
-    repr(smolurl.support) returns a nice bullet point showing the info
+    repr(smolurl.support) returns a nice bullet point list showing the info
     at a glance.
     """
     CERTIFI_CERTS: bool = False

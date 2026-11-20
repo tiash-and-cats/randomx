@@ -1,5 +1,5 @@
+#define uwnd_FPS_TARGET 120
 #include "uwnd.h"
-
 #include <math.h>
 
 int main(void) {
@@ -13,8 +13,11 @@ int main(void) {
     if (!win) return 1;
 
     float t = 0.0f;
-
+    
+    uwnd_FPS_INIT;
     while (win->poll(win)) {
+        uwnd_FPS_START;
+        
         for (int y = 0;
              y < win->framebuffer.height;
              y++) {
@@ -52,16 +55,15 @@ int main(void) {
                     );
 
                 win->framebuffer.putpixel(&win->framebuffer, x, y,
-                    b |
-                    (g << 8) |
-                    (r << 16)
+                    b | (g << 8) | (r << 16) | 0xFF000000
                 );
             }
         }
 
         t += 0.02f;
-
         win->render(win);
+        
+        uwnd_FPS_END;
     }
 
     win->delete(win);

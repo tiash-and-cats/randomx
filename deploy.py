@@ -40,9 +40,11 @@ def arcprovider(tp, prov):
         print("done!")
         
         try:
-            prov(name, tok, dir, zipp)
+            ret = prov(name, tok, dir, zipp)
         finally:
             zipp.unlink()
+        
+        return ret
 
     return inner
 
@@ -151,13 +153,18 @@ class providers:
         # if teams exist, use the first one
         # otherwise omit teamId for personal account
         team_id = teams[0]["id"] if teams else None
-        query_param = f"?teamId={team_id}" if team_id else ""
         print("done!")
         
         # check if project exists
         print("checking projects... ", end="", flush=True)
-        search_url = f"https://api.vercel.com/v11/projects{query_param}&search={name}"
-        res = requests.get(search_url, headers=headers)
+        res = requests.get(
+            "https://api.vercel.com/v11/projects",
+            headers=headers,
+            params={
+                **({"teamId": team_id} if team_id else {}),
+                "search": name
+            }
+        )
         res.raise_for_status()
         projects = res.json().get("projects", [])
         print("done!")
@@ -167,11 +174,12 @@ class providers:
         else:
             # create project if missing
             print("creating project... ", end="", flush=True)
-            create_url = f"https://api.vercel.com/v11/projects{query_param}"
+            create_url = f"https://api.vercel.com/v11/projects"
             res = requests.post(
                 create_url,
                 headers={**headers, "Content-Type": "application/json"},
-                json={"name": name}
+                json={"name": name},
+                params={"teamId": team_id} if team_id else {}
             )
             res.raise_for_status()
             project_id = res.json()["id"]
@@ -194,13 +202,18 @@ class providers:
                 # upload the file binary content to Vercel's cache file store
                 # Vercel bypasses uploading if the server already contains
                 # this exact SHA-1 digest
-                upload_url = f"https://api.vercel.com/v2/files{query_param}"
+                upload_url = f"https://api.vercel.com/v2/files"
                 upload_headers = {
                     **headers,
                     "x-vercel-digest": sha1_hash,
                     "Content-Type": "application/octet-stream"
                 }
-                upload_res = requests.post(upload_url, headers=upload_headers, data=file_bytes)
+                upload_res = requests.post(
+                    upload_url,
+                    headers=upload_headers,
+                    data=file_bytes,
+                    params={"teamId": team_id} if team_id else {}
+                )
                 upload_res.raise_for_status()
                 
                 # Save metadata mapping for deployment payload
@@ -216,7 +229,7 @@ class providers:
 
         # trigger deployment with files metadata payload
         print("creating deployment... ", end="", flush=True)
-        deploy_url = f"https://api.vercel.com/v13/deployments{query_param}"
+        deploy_url = f"https://api.vercel.com/v13/deployments"
         res = requests.post(
             deploy_url,
             headers={**headers, "Content-Type": "application/json"},
@@ -227,7 +240,8 @@ class providers:
                 "projectSettings": {
                     "framework": None
                 }
-            }
+            },
+            params={"teamId": team_id} if team_id else {}
         )
         res.raise_for_status()
         deployment_data = res.json()
@@ -270,7 +284,9 @@ class providers:
             "Authorization": f"Bearer {tok}",
             
             # don't create duplicates
-            "Idempotency-Key": str(hash(tuple(checksums)))
+            "Idempotency-Key": (
+                hashlib.sha256("".join(checksums).encode()).hexdigest()
+            )
         }
 
         res = requests.post(
@@ -410,7 +426,7 @@ class providers:
             if path.is_file() and not path.name.startswith("."):
                 relpath = path.relative_to(dir).as_posix()
                 
-                if path.name.rsplit(".", 1)[-1] not in (
+                if path.name.casefold().rsplit(".", 1)[-1] not in (
                     # from https://neocities.org/site_files/allowed_types
                     "apng", "asc", "atom", "avif", "bin", "cjs", "css", "csv",
                     "dae", "eot", "epub", "geojson", "gif", "glb", "glsl",
@@ -530,11 +546,12 @@ class now(_basecommand):
     """
     Deploy NOW!
     
-    The default provider is by default "netlify". You can change this in two
-    ways. The first is to use the -p option to change it for one command.
+    The default provider is by default "netlify". You can change this
+    in two ways. The first is to use the -p option to change it for
+    one command.
     
-    The second is to create a ~/.deploy.toml file, and set defaults.provider
-    to your desired provider.
+    The second is to create a ~/.deploy.toml file, and set
+    defaults.provider to your desired provider.
     """
     
     def init(self, subp):

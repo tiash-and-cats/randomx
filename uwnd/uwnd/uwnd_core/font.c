@@ -1,4 +1,4 @@
-#include "../uwnd.h"
+#include "uwnd.h"
 
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "./stb/stb_truetype.h"
@@ -6,35 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-uwnd_Font* uwnd_new_Font(const char* path) {
-    FILE* fp = fopen(path, "rb");
-
-    if (!fp) {
-        return NULL;
-    }
-
-    fseek(fp, 0, SEEK_END);
-
-    long size = ftell(fp);
-
-    rewind(fp);
-
-    unsigned char* buffer = malloc(size);
-
-    if (!buffer) {
-        fclose(fp);
-        return NULL;
-    }
-
-    fread(
-        buffer,
-        1,
-        size,
-        fp
-    );
-
-    fclose(fp);
-
+uwnd_Font* uwnd_font_from_buf(unsigned char* buffer) {
     uwnd_Font* font = malloc(sizeof(uwnd_Font));
 
     if (!font) {
@@ -55,6 +27,31 @@ uwnd_Font* uwnd_new_Font(const char* path) {
     return font;
 }
 
+uwnd_Font* uwnd_new_Font(const char* path) {
+    FILE* fp = fopen(path, "rb");
+
+    if (!fp) {
+        return NULL;
+    }
+
+    fseek(fp, 0, SEEK_END);
+    long size = ftell(fp);
+    rewind(fp);
+
+    unsigned char* buffer = malloc(size);
+
+    if (!buffer) {
+        fclose(fp);
+        return NULL;
+    }
+
+    fread(buffer, 1, size, fp);
+    fclose(fp);
+
+    return uwnd_font_from_buf(buffer);
+}
+
+char* uwnd__platform_find_Font(const char* name);
 char* uwnd_find_font(const char* name) {
     return uwnd__platform_find_Font(name);
 }
@@ -212,7 +209,7 @@ void uwnd_Framebuffer_text(
                 uint8_t b = (color & 255) * a / 255;
 
                 self->pixels[py * self->width + px] =
-                    (r << 16) | (g << 8) | b;
+                    0xFF000000 | (r << 16) | (g << 8) | b;
             }
         }
 

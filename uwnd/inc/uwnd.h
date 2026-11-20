@@ -1,11 +1,14 @@
-#ifndef uwnd_H
-#define uwnd_H
+#ifndef uwnd__UWND_H
+#define uwnd__UWND_H
 
 #include <stdint.h>
 #include <stddef.h>
 #include "uwnd_core/stb/stb_truetype.h"
+#include "uwnd_core/fps.h"
 
 char* uwnd_find_font(const char* name);
+struct uwnd_Font* uwnd_font_from_buf(unsigned char* buffer);
+struct uwnd_Framebuffer* uwnd_load_image(const char* filepath);
 
 // STRUCTS
 
@@ -46,11 +49,20 @@ typedef struct uwnd_Framebuffer {
 
         const char* text
     );
+    void (*delete)(struct uwnd_Framebuffer* self);
+    void (*blit)(
+        struct uwnd_Framebuffer* self,
+        struct uwnd_Framebuffer* src,
+        int dest_x,
+        int dest_y
+    );
+    struct uwnd_Framebuffer* (*scale)(struct uwnd_Framebuffer* src, int target_w, int target_h);
 } uwnd_Framebuffer;
 
 void uwnd_Framebuffer_putpixel(uwnd_Framebuffer* self, int x, int y, uint32_t color);
 uint32_t uwnd_Framebuffer_getpixel(uwnd_Framebuffer* self, int x, int y);
 void uwnd_Framebuffer_rect(uwnd_Framebuffer* self, int x, int y, int w, int h, uint32_t color);
+void uwnd_Framebuffer_delete(uwnd_Framebuffer* self);
 
 void uwnd_Framebuffer_text(
     uwnd_Framebuffer* self,
@@ -65,6 +77,13 @@ void uwnd_Framebuffer_text(
     uint32_t color,
 
     const char* text
+);
+
+void uwnd_Framebuffer_blit(
+    uwnd_Framebuffer* self,
+    uwnd_Framebuffer* src,
+    int dest_x,
+    int dest_y
 );
 
 #define uwnd_MAX_EVENTS 256
@@ -138,4 +157,4 @@ static void uwnd__push_Event(
     uwnd_Event evt
 );
 
-#endif
+#endif /* #ifndef uwnd__UWND_H */

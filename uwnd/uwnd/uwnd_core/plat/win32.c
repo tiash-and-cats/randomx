@@ -9,8 +9,7 @@
 #include <wchar.h>
 #include <locale.h>
 
-#include "../../uwnd.h"
-#include "../fb.c"
+#include "uwnd.h"
 
 typedef struct uwnd__PlatData {
     HWND hwnd;
